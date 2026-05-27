@@ -112,10 +112,26 @@ export function NoteEditor({
   });
 
   // Sync external value → editor without clobbering the user's caret.
+  //
+  // IME guard: ProseMirror sets `view.composing` while the system holds an
+  // active composition buffer (Russian, Chinese, Japanese, Korean, dead-key
+  // accents, etc.). Calling `setContent` mid-composition flushes the buffer
+  // and the OS re-commits each glyph, producing doubled/garbled output —
+  // typing "какая" came out as "rfrfrfz"-style mojibake. We skip the sync
+  // while composing and re-run it once composition ends, so external
+  // updates still land but never during the fragile composition window.
+  const pendingSyncRef = useRef(false);
   useEffect(() => {
     if (!editor) return;
+    if (editor.view.composing) {
+      pendingSyncRef.current = true;
+      return;
+    }
     const current = getMarkdown(editor);
-    if (value === current) return;
+    if (value === current) {
+      pendingSyncRef.current = false;
+      return;
+    }
 
     const { from, to } = editor.state.selection;
     editor.commands.setContent(value, { emitUpdate: false });
@@ -126,7 +142,42 @@ export function NoteEditor({
     } else {
       editor.commands.focus("end");
     }
+    pendingSyncRef.current = false;
   }, [value, editor]);
+
+  // After IME composition ends, fire a deferred sync if `value` diverged
+  // from the editor while we were skipping it. We re-read the latest value
+  // through a ref to avoid re-creating the listener on every render.
+  const valueRef = useRef(value);
+  useEffect(() => {
+    valueRef.current = value;
+  }, [value]);
+  useEffect(() => {
+    if (!editor) return;
+    const dom = editor.view.dom;
+    const handleCompositionEnd = () => {
+      if (!pendingSyncRef.current) return;
+      const latest = valueRef.current;
+      const current = getMarkdown(editor);
+      if (latest === current) {
+        pendingSyncRef.current = false;
+        return;
+      }
+      const { from, to } = editor.state.selection;
+      editor.commands.setContent(latest, { emitUpdate: false });
+      const docSize = editor.state.doc.content.size;
+      if (from <= docSize && to <= docSize) {
+        editor.commands.setTextSelection({ from, to });
+      } else {
+        editor.commands.focus("end");
+      }
+      pendingSyncRef.current = false;
+    };
+    dom.addEventListener("compositionend", handleCompositionEnd);
+    return () => {
+      dom.removeEventListener("compositionend", handleCompositionEnd);
+    };
+  }, [editor]);
 
   return (
     <div
