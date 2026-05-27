@@ -38,6 +38,26 @@ pub fn download_whisper_model(engine: Arc<AudioTranscriptionEngine>) -> Result<P
         return Ok(model_path);
     }
 
+    // hf-hub get() uses read_to_string without trim, so a trailing \n in refs/main
+    // (written by Python's huggingface_hub) causes the snapshot path lookup to fail.
+    let ref_path = cache
+        .path()
+        .join("models--ggerganov--whisper.cpp")
+        .join("refs")
+        .join("main");
+    if let Ok(commit_hash) = std::fs::read_to_string(&ref_path) {
+        let model_path = cache
+            .path()
+            .join("models--ggerganov--whisper.cpp")
+            .join("snapshots")
+            .join(commit_hash.trim())
+            .join(model_name);
+        if model_path.exists() {
+            info!("model found in cache (trimmed ref) at {:?}", model_path);
+            return Ok(model_path);
+        }
+    }
+
     let api_repo = api.repo(repo);
 
     info!("downloading model {:?}", model_name);
@@ -56,7 +76,23 @@ pub fn get_cached_whisper_model_path(engine: &AudioTranscriptionEngine) -> Optio
         RepoType::Model,
         "main".to_string(),
     ));
-    cache_repo.get(model_name)
+    if let Some(path) = cache_repo.get(model_name) {
+        return Some(path);
+    }
+    // Fallback: refs/main written by Python huggingface_hub has a trailing \n
+    let ref_path = cache
+        .path()
+        .join("models--ggerganov--whisper.cpp")
+        .join("refs")
+        .join("main");
+    let commit_hash = std::fs::read_to_string(&ref_path).ok()?;
+    let model_path = cache
+        .path()
+        .join("models--ggerganov--whisper.cpp")
+        .join("snapshots")
+        .join(commit_hash.trim())
+        .join(model_name);
+    model_path.exists().then_some(model_path)
 }
 
 pub fn create_whisper_context_parameters<'a>(
